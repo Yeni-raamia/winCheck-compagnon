@@ -8,14 +8,19 @@ winCheck-compagnon est un script PowerShell qui vérifie une vingtaine de points
 
 ## Ce qu'il vérifie
 
-winCheck-compagnon passe en revue six familles de contrôles :
+winCheck-compagnon passe en revue plusieurs familles de contrôles :
 
 - **Identité du poste** — Secure Boot, chiffrement BitLocker, contrôle de compte d'utilisateur (UAC), puce TPM
 - **Protection** — antivirus temps réel, pare-feu, âge des signatures, protection anti-falsification, SmartScreen, protection contre les applications indésirables
 - **Mises à jour** — ancienneté de la dernière mise à jour Windows installée
 - **Comptes** — nombre d'administrateurs locaux, état du compte Invité
 - **Durcissement** — protocole SMBv1, LLMNR, stockage des mots de passe WDigest
+- **Réseau** — Bureau à distance (RDP), partages réseau exposés
+- **Surveillance** — ports en écoute, connexions actives, processus s'exécutant depuis des emplacements inhabituels (à titre informatif)
+- **Applications interdites** — détection des logiciels proscrits sur un poste professionnel : accès distant non maîtrisé, P2P/torrent, jeux, minage, stockage cloud personnel, messageries non autorisées, VPN de contournement, cracks
 - **Persistance** — programmes lancés au démarrage et tâches planifiées (à titre informatif)
+
+Le rapport propose en plus un **sommaire de navigation** pour parcourir facilement toutes les sections.
 
 Chaque point est expliqué : ce qui est vérifié, le risque associé, et la marche à suivre pour corriger.
 

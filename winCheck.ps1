@@ -293,6 +293,74 @@ function Test-CompteInvite {
     }
 }
 
+function Test-BureauADistance {
+    # On lit l'etat du Bureau a distance dans le registre.
+    # fDenyTSConnections = 1 : RDP refuse (desactive). = 0 : RDP autorise (active).
+    $cle = "HKLM:\System\CurrentControlSet\Control\Terminal Server"
+    $valeur = (Get-ItemProperty -Path $cle -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
+
+    if ($valeur -eq 0) {
+        $etat    = "Attention"
+        $constat = "Le Bureau à distance (RDP) est activé sur ce poste."
+        $risque  = "Le RDP est l'un des vecteurs les plus exploités par les rançongiciels. Activé sans protection, il expose le poste aux attaques par force brute et au vol d'identifiants."
+        $action  = "S'il n'est pas indispensable, désactivez-le (Paramètres > Système > Bureau à distance). S'il est nécessaire, exigez l'authentification NLA, restreignez l'accès par pare-feu et passez par un VPN."
+    }
+    else {
+        $etat    = "Conforme"
+        $constat = "Le Bureau à distance (RDP) est désactivé."
+        $risque  = ""
+        $action  = ""
+    }
+
+    return @{
+        Nom       = "Bureau à distance (RDP)"
+        Categorie = "Réseau"
+        Etat      = $etat
+        Valeur    = $constat
+        Risque    = $risque
+        Action    = $action
+        Poids     = 2
+    }
+}
+
+function Test-PartagesReseau {
+   # Get-SmbShare liste tous les partages. On ecarte :
+    #  - les partages systeme/admin marques .Special ($true) : C$, ADMIN$, IPC$...
+    #  - les partages dont le nom finit par "$" (caches par convention), comme
+    #    print$ (pilotes d'imprimante) qui est legitime, pas un partage de donnees.
+    # On ne garde que les partages personnalises reellement exposes.
+    $partages = @(Get-SmbShare -ErrorAction SilentlyContinue | Where-Object {
+        -not $_.Special -and $_.Name -notlike '*$'
+    })
+
+    if (-not $partages) {
+        return @{
+            Nom       = "Partages réseau"
+            Categorie = "Réseau"
+            Etat      = "Conforme"
+            Valeur    = "Aucun partage réseau personnalisé. Seuls les partages administratifs par défaut sont présents."
+            Risque    = ""
+            Action    = ""
+            Poids     = 2
+        }
+    }
+
+    $details = foreach ($p in $partages) {
+        "$($p.Name) -> $($p.Path)"
+    }
+
+    return @{
+        Nom       = "Partages réseau"
+        Categorie = "Réseau"
+        Etat      = "Attention"
+        Valeur    = "$($partages.Count) partage(s) réseau exposé(s) sur ce poste."
+        Risque    = "Un dossier partagé mal protégé peut exposer des fichiers sensibles aux autres utilisateurs du réseau, voire servir de point de propagation à un rançongiciel."
+        Action    = "Vérifiez que chaque partage est légitime et que ses permissions sont restreintes aux seules personnes concernées. Supprimez les partages inutiles."
+        Poids     = 2
+        Details   = @($details)
+    }
+}
+
 function Test-DemarrageAuto {
     # Les deux emplacements classiques de demarrage automatique
     $chemins = @(
@@ -734,6 +802,185 @@ function Test-SmartScreen {
         Poids     = 2
     }
 }
+function Test-PortsEnEcoute {
+    # On liste les ports TCP en ECOUTE accessibles depuis le reseau.
+    # LocalAddress 0.0.0.0 (IPv4) ou :: (IPv6) = ecoute sur TOUTES les interfaces.
+    # On ignore 127.0.0.1 / ::1 (ecoute locale uniquement, non exposee).
+    $ecoutes = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -eq "0.0.0.0" -or $_.LocalAddress -eq "::" } |
+        Sort-Object LocalPort -Unique)
+
+    # Pour chaque port, on retrouve le programme qui l'a ouvert (via son PID).
+    $details = foreach ($e in $ecoutes) {
+        $proc = (Get-Process -Id $e.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+        if (-not $proc) { $proc = "?" }
+        "Port $($e.LocalPort) <- $proc (PID $($e.OwningProcess))"
+    }
+
+    return @{
+        Nom       = "Ports en écoute"
+        Categorie = "Surveillance"
+        Etat      = "Information"
+        Valeur    = "$($ecoutes.Count) service(s) en écoute accessibles depuis le réseau. Vérifiez que vous reconnaissez les programmes associés."
+        Risque    = ""
+        Action    = ""
+        Poids     = 0
+        Details   = @($details)
+    }
+}
+
+function Test-Processus {
+    # On recherche les processus qui s'executent depuis un dossier temporaire
+    # ou de telechargement : un logiciel legitime y tourne tres rarement,
+    # alors que les programmes malveillants s'y installent souvent.
+    # Get-CimInstance Win32_Process donne le chemin complet de chaque executable.
+    $suspects = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ExecutablePath -and (
+                $_.ExecutablePath -match '\\Temp\\' -or
+                $_.ExecutablePath -match '\\Downloads\\'
+            )
+        })
+
+    if (-not $suspects) {
+        return @{
+            Nom       = "Processus en cours"
+            Categorie = "Surveillance"
+            Etat      = "Conforme"
+            Valeur    = "Aucun processus ne s'exécute depuis un dossier temporaire ou de téléchargement."
+            Risque    = ""
+            Action    = ""
+            Poids     = 0
+        }
+    }
+
+    $details = foreach ($p in $suspects) {
+        "$($p.Name) -> $($p.ExecutablePath)"
+    }
+
+    return @{
+        Nom       = "Processus en cours"
+        Categorie = "Surveillance"
+        Etat      = "Attention"
+        Valeur    = "$($suspects.Count) processus s'exécute(nt) depuis un emplacement inhabituel (dossier temporaire ou téléchargements)."
+        Risque    = "Les programmes malveillants s'exécutent fréquemment depuis ces dossiers, où un logiciel légitime ne tourne que très rarement."
+        Action    = "Identifiez chaque programme listé. Si vous ne le reconnaissez pas, lancez une analyse antivirus complète et, en cas de doute, isolez le poste du réseau."
+        Poids     = 0
+        Details   = @($details)
+    }
+}
+
+function Test-ConnexionsActives {
+    # Connexions TCP etablies vers des adresses distantes (reseau local + Internet).
+    # On exclut le loopback 127.0.0.1 / ::1 : ce sont des communications internes au poste.
+    $cnx = @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.RemoteAddress -ne "127.0.0.1" -and $_.RemoteAddress -ne "::1"
+        } |
+        Sort-Object RemoteAddress)
+
+    if (-not $cnx) {
+        return @{
+            Nom       = "Connexions actives"
+            Categorie = "Surveillance"
+            Etat      = "Information"
+            Valeur    = "Aucune connexion sortante établie pour le moment."
+            Risque    = ""
+            Action    = ""
+            Poids     = 0
+        }
+    }
+
+    # Pour chaque connexion : adresse distante, port, et programme responsable.
+    $details = foreach ($c in $cnx) {
+        $proc = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+        if (-not $proc) { $proc = "?" }
+        "$($c.RemoteAddress):$($c.RemotePort) <- $proc (PID $($c.OwningProcess))"
+    }
+
+    return @{
+        Nom       = "Connexions actives"
+        Categorie = "Surveillance"
+        Etat      = "Information"
+        Valeur    = "$($cnx.Count) connexion(s) établie(s) avec des adresses distantes. Vérifiez que les programmes et destinations vous semblent légitimes."
+        Risque    = ""
+        Action    = ""
+        Poids     = 0
+        Details   = @($details)
+    }
+}
+
+function Test-Applications {
+    # --- 1. Inventaire des logiciels installes (registre "Uninstall") ---
+    $chemins = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $apps = foreach ($chemin in $chemins) {
+        Get-ItemProperty -Path $chemin -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -and $_.SystemComponent -ne 1 } |
+            Select-Object -ExpandProperty DisplayName
+    }
+    $apps = @($apps | Sort-Object -Unique)
+
+    # --- 2. Liste noire : categories d'applications a proscrire sur un poste sensible ---
+    # Tu peux completer librement chaque categorie, ou en ajouter d'autres.
+    $listeNoire = [ordered]@{
+        "Accès distant non maîtrisé"        = @("TeamViewer", "AnyDesk", "UltraViewer", "RustDesk", "VNC", "LogMeIn", "Ammyy", "Splashtop", "ToDesk", "Supremo", "Chrome Remote Desktop")
+        "Partage de fichiers P2P / torrent" = @("uTorrent", "BitTorrent", "qBittorrent", "Vuze", "Deluge", "eMule", "LimeWire", "FrostWire")
+        "Jeux et plateformes de jeu"        = @("Steam", "Epic Games", "Battle.net", "Ubisoft Connect", "EA app", "GOG Galaxy", "Riot", "Roblox", "Minecraft")
+        "Minage de cryptomonnaie"           = @("NiceHash", "XMRig", "MinerGate", "Cudo Miner")
+        "Stockage cloud personnel"          = @("Dropbox", "Google Drive", "MEGAsync", "pCloud", "iCloud", "MediaFire", "Sync.com")
+        "Messageries personnelles"          = @("WhatsApp", "Telegram", "Signal", "Viber", "WeChat", "Discord")
+        "VPN et outils de contournement"    = @("NordVPN", "ExpressVPN", "ProtonVPN", "CyberGhost", "Surfshark", "Hotspot Shield", "Psiphon", "Ultrasurf", "Windscribe", "TunnelBear", "Tor Browser")
+        "Activateurs et cracks (piratage)"  = @("KMSpico", "KMSAuto", "AutoKMS", "Re-Loader", "Microsoft Toolkit")
+        # "Outils de securite offensive"    = @("Mimikatz", "Metasploit", "Cain", "Hashcat", "John the Ripper", "Aircrack", "Cobalt Strike")   # a decommenter pour les postes NON techniques uniquement
+    }
+
+    # --- 3. Decompte par categorie + liste des applications detectees ---
+    $details = @()
+    $totalInterdites = 0
+    foreach ($cat in $listeNoire.Keys) {
+        # Logiciels installes correspondant a un motif de CETTE categorie.
+        $appsDeCat = foreach ($app in $apps) {
+            foreach ($motif in $listeNoire[$cat]) {
+                if ($app -like "*$motif*") { $app; break }
+            }
+        }
+        $appsDeCat = @($appsDeCat)
+
+        $totalInterdites += $appsDeCat.Count
+        $details += "$cat : $($appsDeCat.Count)"
+        foreach ($a in $appsDeCat) { $details += "    - $a" }
+    }
+
+    # Cas conforme : rien d'interdit.
+    if ($totalInterdites -eq 0) {
+        return @{
+            Nom       = "Applications interdites"
+            Categorie = "Applications"
+            Etat      = "Conforme"
+            Valeur    = "Aucune application interdite parmi les $($apps.Count) logiciels installés. Décompte par catégorie surveillée :"
+            Risque    = ""
+            Action    = ""
+            Poids     = 3
+            Details   = @($details)
+        }
+    }
+
+    # Cas critique : des applications proscrites sont presentes.
+    return @{
+        Nom       = "Applications interdites"
+        Categorie = "Applications"
+        Etat      = "Critique"
+        Valeur    = "$totalInterdites application(s) interdite(s) détectée(s) sur ce poste. Décompte par catégorie :"
+        Risque    = "Ces logiciels n'ont pas leur place sur un poste professionnel sensible : ils élargissent la surface d'attaque, peuvent servir de canal d'exfiltration ou de prise de contrôle à distance, et enfreignent la politique de sécurité."
+        Action    = "Désinstallez-les, ou documentez et justifiez formellement leur présence si elle est exceptionnellement autorisée."
+        Poids     = 3
+        Details   = @($details)
+    }
+}
 
 # ===== AFFICHAGE D'UN RESULTAT =====
 
@@ -956,12 +1203,24 @@ function New-RapportHtml($resultats, $score) {
 
     # Corps : une section par categorie, cartes en grille
     $corps = ""
+    $sommaire = ""
     $categories = $resultats.Categorie | Select-Object -Unique
+    $index = 0
 
     foreach ($cat in $categories) {
+        $index++
+        $ancre      = "cat-$index"
         $scoreCat   = $scoresParCat[$cat]
         $scoreTexte = if ($null -ne $scoreCat) { " — $scoreCat %" } else { "" }
-        $corps += "<div class='categorie'><div class='categorie-titre'>$cat$scoreTexte</div><div class='cartes'>"
+
+        # Entree du sommaire (score colore selon le niveau)
+        if ($null -eq $scoreCat)  { $scoreSom = "";            $classeSom = "som-info" }
+        elseif ($scoreCat -ge 80) { $scoreSom = "$scoreCat %"; $classeSom = "som-bon" }
+        elseif ($scoreCat -ge 50) { $scoreSom = "$scoreCat %"; $classeSom = "som-moyen" }
+        else                      { $scoreSom = "$scoreCat %"; $classeSom = "som-faible" }
+        $sommaire += "<a class='sommaire-item' href='#$ancre'><span class='sommaire-nom'>$cat</span><span class='sommaire-score $classeSom'>$scoreSom</span></a>"
+
+        $corps += "<div class='categorie' id='$ancre'><div class='categorie-titre'>$cat$scoreTexte</div><div class='cartes'>"
 
         $controles = $resultats | Where-Object { $_.Categorie -eq $cat }
         foreach ($r in $controles) {
@@ -1025,6 +1284,10 @@ function New-RapportHtml($resultats, $score) {
             $radarBloc
         </div>
     </div>
+    <div class="sommaire">
+        <h2>Sommaire</h2>
+        <div class="sommaire-liste">$sommaire</div>
+    </div>
     $corps
     <div class="pied">winCheck-compagnon — Famille « Outils Compagnon »<br>DOUKAKAS Yeni</div>
 </div>
@@ -1040,25 +1303,30 @@ function New-RapportHtml($resultats, $score) {
 # ===== PROGRAMME PRINCIPAL =====
 
 $resultats = @()
-$resultats += Test-InfosSysteme
-$resultats += Test-SecureBoot
-$resultats += Test-BitLocker
-$resultats += Test-UAC
-$resultats += Test-TPM
-$resultats += Test-AntivirusTempsReel
-$resultats += Test-PareFeu
-$resultats += Test-SignaturesAntivirus
-$resultats += Test-TamperProtection
-$resultats += Test-ProtectionPUA
-$resultats += Test-SmartScreen
-$resultats += Test-MisesAJour
-$resultats += Test-AdminsLocaux
-$resultats += Test-CompteInvite
-$resultats += Test-SMBv1
-$resultats += Test-LLMNR
-$resultats += Test-WDigest
-$resultats += Test-DemarrageAuto
-$resultats += Test-TachesPlanifiees
+
+# Liste ordonnee de tous les controles a executer.
+$controles = @(
+    'Test-InfosSysteme', 'Test-SecureBoot', 'Test-BitLocker', 'Test-UAC', 'Test-TPM',
+    'Test-AntivirusTempsReel', 'Test-PareFeu', 'Test-SignaturesAntivirus',
+    'Test-TamperProtection', 'Test-ProtectionPUA', 'Test-SmartScreen',
+    'Test-MisesAJour',
+    'Test-AdminsLocaux', 'Test-CompteInvite',
+    'Test-SMBv1', 'Test-LLMNR', 'Test-WDigest',
+    'Test-BureauADistance', 'Test-PartagesReseau',
+    'Test-DemarrageAuto', 'Test-TachesPlanifiees',
+    'Test-PortsEnEcoute', 'Test-ConnexionsActives', 'Test-Processus',
+    'Test-Applications'
+)
+
+# Execution de chaque controle avec une barre de progression (rassure l'utilisateur).
+$total = $controles.Count
+for ($i = 0; $i -lt $total; $i++) {
+    $pct = [math]::Round((($i + 1) / $total) * 100)
+    Write-Progress -Activity "Analyse de la securite du poste" -Status "$pct %" -PercentComplete $pct
+    $resultats += & $controles[$i]
+}
+Write-Progress -Activity "Analyse de la securite du poste" -Completed
+
 
 foreach ($r in $resultats) {
     Show-Resultat $r
